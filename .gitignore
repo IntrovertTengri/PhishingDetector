@@ -1,0 +1,13 @@
+# Sensitive credentials
+.env
+
+# Database data (don't upload the whole DB)
+db_data/
+
+# Python environment
+.venv/
+__pycache__/
+*.pyc
+
+# IDE settings
+.idea/

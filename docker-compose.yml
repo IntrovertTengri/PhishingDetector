@@ -1,0 +1,96 @@
+version: '3.8'
+
+services:
+  # Redis (The Fast-Path Cache)
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  # Message-broker (The Queue)
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672" # The UI
+
+  # Service 1: The Admin API (Manual Scans & Adding Inboxes)
+  api:
+    build: ./api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+      - rabbitmq
+      - db
+    environment:
+      - REDIS_HOST=${REDIS_HOST}
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
+      - DATABASE_URL=${DATABASE_URL}
+
+  # Service 2: The ML Worker (The AI Brain)
+  worker:
+    build: ./worker
+    depends_on:
+      - redis
+      - rabbitmq
+      - db
+    environment:
+      - REDIS_HOST=${REDIS_HOST}
+      - RABBITMQ_HOST=${RABBITMQ_HOST}
+      - DATABASE_URL=${DATABASE_URL}
+
+  # Service 3: The Live Gmail Poller (The Watcher)
+  poller-manager:
+    build: ./poller
+    container_name: poller_manager
+    command: python manager.py
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - DATABASE_URL=${DATABASE_URL}
+      - GMAIL_USER=${GMAIL_USER}
+      - GMAIL_PASSWORD=${GMAIL_PASSWORD}
+    depends_on:
+      - rabbitmq
+      - db
+
+  # Service 3.5: The Poller Fleet (The Workers)
+  poller-node:
+    build: ./poller
+    command: python node.py
+    environment:
+      - RABBITMQ_HOST=rabbitmq
+      - REDIS_HOST=redis
+    depends_on:
+      - rabbitmq
+      - redis
+
+  # Service 4: The Streamlit UI (The Corporate Dashboard)
+  ui:
+    build: ./ui
+    ports:
+      - "8501:8501"
+    depends_on:
+      - db
+    environment:
+      - DATABASE_URL=${DATABASE_URL}
+
+  # The Database (The Memory & Audit Log)
+  db:
+    image: postgres:15-alpine
+    container_name: postgres-db
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+# THIS MUST BE ALIGNED WITH 'services:' AT THE LEFT MARGIN
+volumes:
+  db_data:
