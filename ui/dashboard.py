@@ -5,12 +5,14 @@ import os
 import time
 import requests
 
-API_URL = "http://api:8000/scan/"
+# Pointing to the FastAPI container
+API_BASE_URL = "http://api:8000"
 
 def get_db_connection():
     return psycopg2.connect(os.getenv("DATABASE_URL"))
 
 def get_data():
+    """Fetches the latest analysis results for the dashboard."""
     try:
         with get_db_connection() as conn:
             query = """
@@ -18,149 +20,155 @@ def get_data():
                     FROM phishing_logs
                     ORDER BY received_at DESC LIMIT 50 \
                     """
-            df = pd.read_sql(query, conn)
-        return df
+            return pd.read_sql(query, conn)
     except Exception as e:
-        st.error(f"CRITICAL DATABASE ERROR: {e}")
+        st.error(f"Data Sync Error: {e}")
         return pd.DataFrame()
 
 def check_result(email_hash):
+    """Checks if the ML Worker has finished processing a specific hash."""
     try:
         with get_db_connection() as conn:
-            # 100% IMMUNE: Using 'params' to sanitize the hash input
             query = "SELECT verdict, confidence FROM phishing_logs WHERE content_hash = %s"
-            df = pd.read_sql(query, conn, params=(email_hash,))
-        return df
+            return pd.read_sql(query, conn, params=(email_hash,))
     except Exception:
         return pd.DataFrame()
 
-# --- FUNCTIONS FOR INBOX MANAGEMENT ---
 def get_monitored_inboxes():
+    """Fetches the current roster of monitored employees."""
     try:
         with get_db_connection() as conn:
-            query = "SELECT id, display_name, email_address, is_active FROM monitored_inboxes"
-            df = pd.read_sql(query, conn)
-        return df
+            query = "SELECT display_name, email_address, is_active FROM monitored_inboxes"
+            return pd.read_sql(query, conn)
     except Exception:
         return pd.DataFrame()
 
-def add_monitored_inbox(name, email, app_pwd):
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as cur:
-                # Parameterized query to prevent SQL injection on employee inputs
-                cur.execute(
-                    "INSERT INTO monitored_inboxes (display_name, email_address, app_password) VALUES (%s, %s, %s)",
-                    (name, email, app_pwd)
-                )
-            # The 'with' block for conn automatically commits the transaction!
-        return True
-    except Exception as e:
-        st.error(f"Database error: {e}")
-        return False
+# --- Page Configuration ---
+st.set_page_config(page_title="Phishing Shield", layout="wide")
+st.title("Phishing Detection Gateway")
 
-st.set_page_config(page_title="Corporate Phishing Shield", layout="wide")
-st.title("Enterprise Threat Gateway")
-
-tab1, tab2, tab3 = st.tabs(["IT Dashboard", "Employee Scanner", "Manage Inboxes"])
+tab1, tab2, tab3 = st.tabs(["Dashboard", "Scanner", "Settings"])
 
 # ==========================================
-# TAB 1: THE IT DASHBOARD
+# TAB 1: DASHBOARD
 # ==========================================
 with tab1:
     col_a, col_b = st.columns([0.8, 0.2])
     with col_b:
-        if st.button("Refresh Dashboard"):
+        if st.button("Refresh Results", use_container_width=True):
             st.rerun()
 
     df = get_data()
     if not df.empty:
         col1, col2 = st.columns(2)
         phishing_count = len(df[df['verdict'] == 'PHISHING'])
-        col1.metric("Total Emails Scanned", len(df))
-        col2.metric("Threats Detected", phishing_count, delta_color="inverse")
+        col1.metric("Total Processed", len(df))
+        col2.metric("Threats Flagged", phishing_count, delta_color="inverse")
 
-        st.subheader("Live Analysis Feed")
-        def color_verdict(row):
-            return ['background-color: #ffcccc' if row.verdict == 'PHISHING' else '' for _ in row]
+        st.subheader("Live Feed")
 
-        st.dataframe(df.style.apply(color_verdict, axis=1), use_container_width=True, hide_index=True)
+        def highlight_threats(row):
+            if row.verdict == 'PHISHING':
+                return ['background-color: #950000; color: white; font-weight: bold;' for _ in row]
+            return ['' for _ in row]
+
+        st.dataframe(
+            df.style.apply(highlight_threats, axis=1),
+            use_container_width=True,
+            hide_index=True
+        )
     else:
-        st.info("System Online. Waiting for incoming traffic...")
+        st.info("No logs found. Waiting for incoming traffic.")
 
 # ==========================================
-# TAB 2: THE EMPLOYEE SCANNER
+# TAB 2: MANUAL SCANNER
 # ==========================================
 with tab2:
-    st.subheader("Suspicious Email Scanner")
-    with st.form("manual_scan_form"):
-        sender = st.text_input("Sender Address", placeholder="e.g., HR@mycompany.com")
-        subject = st.text_input("Email Subject")
-        body = st.text_area("Email Body", height=150)
+    st.subheader("Manual Analysis")
+    st.write("Submit suspicious email content for AI evaluation.")
 
-        if st.form_submit_button("Scan for Threats", type="primary"):
-            if sender and subject and body:
+    with st.form("manual_scan_form"):
+        sender = st.text_input("From", placeholder="sender@example.com")
+        subject = st.text_input("Subject")
+        body = st.text_area("Content", height=200)
+
+        if st.form_submit_button("Analyze", type="primary"):
+            if all([sender, subject, body]):
                 try:
-                    res = requests.post(API_URL, json={"sender": sender, "subject": subject, "body_text": body})
+                    res = requests.post(f"{API_BASE_URL}/scan/", json={
+                        "sender": sender,
+                        "subject": subject,
+                        "body_text": body
+                    })
+
                     if res.status_code == 200:
                         email_hash = res.json().get("hash")
-                        with st.spinner("AI is analyzing the text..."):
-                            for _ in range(20):
-                                time.sleep(0.5)
+                        with st.spinner("Processing..."):
+                            found = False
+                            for _ in range(15):
+                                time.sleep(1)
                                 result_df = check_result(email_hash)
                                 if not result_df.empty:
                                     verdict = result_df.iloc[0]['verdict']
                                     confidence = result_df.iloc[0]['confidence']
-                                    st.markdown("---")
+
+                                    st.write("---")
                                     if verdict == 'PHISHING':
-                                        st.error(f"**WARNING: PHISHING DETECTED!** (Confidence: {confidence:.2f})")
+                                        st.error(f"Result: PHISHING (Confidence: {confidence:.2%})")
                                     else:
-                                        st.success(f"**SAFE.** (Confidence: {confidence:.2f})")
+                                        st.success(f"Result: SAFE (Confidence: {confidence:.2%})")
+                                    found = True
                                     break
+                            if not found:
+                                st.warning("Analysis pending. Check the Dashboard in a few minutes.")
                 except Exception as e:
-                    st.error(f"API Error: {e}")
-            else:
-                st.warning("Please fill in all fields.")
-
-# ==========================================
-# TAB 3: MANAGE INBOXES
-# ==========================================
-with tab3:
-    col_x, col_y = st.columns([0.7, 0.3])
-    with col_x:
-        st.subheader("Monitored Email Accounts")
-        st.markdown("Add new employee inboxes for the background Poller to monitor.")
-    with col_y:
-        # THE NEW MANUAL OVERRIDE BUTTON
-        if st.button("Force Check Inboxes Now", use_container_width=True):
-            try:
-                res = requests.post("http://api:8000/trigger-poll/")
-                if res.status_code == 200:
-                    st.success(res.json().get("status"))
-                else:
-                    st.error("Failed to trigger the API.")
-            except Exception as e:
-                st.error(f"API Error: {e}")
-
-    with st.form("add_inbox_form"):
-        col1, col2 = st.columns(2)
-        name = col1.text_input("Employee Name", placeholder="e.g., Alice Smith")
-        email = col2.text_input("Gmail Address", placeholder="e.g., alice.security.test@gmail.com")
-        app_pwd = st.text_input("Google App Password", type="password", help="The 16-character app password")
-
-        if st.form_submit_button("Add to Roster", type="primary"):
-            if name and email and app_pwd:
-                if add_monitored_inbox(name, email, app_pwd):
-                    st.success(f"Added {email}! The Poller will check it on its next loop.")
-                    time.sleep(1)
-                    st.rerun()
+                    st.error(f"Network error: {e}")
             else:
                 st.warning("All fields are required.")
 
-    st.markdown("---")
-    st.markdown("**Currently Monitored Roster:**")
-    inboxes_df = get_monitored_inboxes()
-    if not inboxes_df.empty:
-        st.dataframe(inboxes_df, use_container_width=True, hide_index=True)
+# ==========================================
+# TAB 3: SETTINGS / MANAGEMENT
+# ==========================================
+with tab3:
+    col_title, col_btn = st.columns([0.7, 0.3])
+    with col_title:
+        st.subheader("Inbox Roster")
+    with col_btn:
+        if st.button("Trigger Immediate Check", use_container_width=True):
+            try:
+                res = requests.post(f"{API_BASE_URL}/trigger-poll/")
+                if res.status_code == 200:
+                    st.success("Tasks dispatched.")
+            except Exception as e:
+                st.error(f"API Error: {e}")
+
+    with st.expander("Register New Account", expanded=True):
+        with st.form("add_inbox_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            new_name = c1.text_input("Name")
+            new_email = c2.text_input("Email")
+            new_pwd = st.text_input("App Password", type="password")
+
+            if st.form_submit_button("Save Account"):
+                if all([new_name, new_email, new_pwd]):
+                    try:
+                        api_res = requests.post(f"{API_BASE_URL}/inboxes/", json={
+                            "display_name": new_name,
+                            "email_address": new_email,
+                            "app_password": new_pwd
+                        })
+                        if api_res.status_code == 201:
+                            st.success(f"Registered {new_email}")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error("Failed to register account.")
+                    except Exception as e:
+                        st.error(f"Connectivity error: {e}")
+
+    st.write("---")
+    roster = get_monitored_inboxes()
+    if not roster.empty:
+        st.table(roster)
     else:
-        st.info("No inboxes are currently in the database.")
+        st.info("No accounts are currently monitored.")
